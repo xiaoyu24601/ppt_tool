@@ -204,6 +204,10 @@ uploads/*
 .vscode/
 *.code-workspace
 
+# Claude Code agents (superpowers)
+.agents/
+venv2/
+
 # OS generated files
 .DS_Store
 Thumbs.db
