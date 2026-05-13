@@ -1,222 +1,189 @@
 """
-一句话生成PPT + Gamma去水印 + 布局修复
+PPT 工具箱 — AI 生成 + 去水印 + 修复
 """
 import streamlit as st
-import zipfile
-import xml.etree.ElementTree as ET
-import os
-import tempfile
-import shutil
-import uuid
-import json
+import zipfile, xml.etree.ElementTree as ET, os, tempfile, shutil, uuid, json, io, requests
 from pathlib import Path
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
-import io
 
-st.set_page_config(page_title="AI PPT 生成器", page_icon="🎨", layout="wide")
+st.set_page_config(page_title="PPT 工具箱", page_icon="🪄", layout="wide")
 
-# 注册命名空间
-NSMAP = {
+# 注册 XML 命名空间
+for p, u in {
     'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
     'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
     'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
-}
-for prefix, uri in NSMAP.items():
-    ET.register_namespace(prefix, uri)
+}.items():
+    ET.register_namespace(p, u)
 
 OUTPUT_DIR = Path(__file__).parent / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# ==================== PPT 生成核心 ====================
+# ==================== 主题 & 风格 ====================
 
-PPT_TEMPLATES = {
-    "商务演示": {
-        "bg": (255, 255, 255),
-        "title_color": (30, 60, 120),
-        "accent": (41, 128, 185),
-        "font": "微软雅黑",
-    },
-    "学术答辩": {
-        "bg": (255, 255, 255),
-        "title_color": (52, 73, 94),
-        "accent": (46, 134, 193),
-        "font": "微软雅黑",
-    },
-    "创业路演": {
-        "bg": (255, 255, 255),
-        "title_color": (231, 76, 60),
-        "accent": (243, 156, 18),
-        "font": "微软雅黑",
-    },
-    "工作总结": {
-        "bg": (255, 255, 255),
-        "title_color": (38, 70, 83),
-        "accent": (42, 157, 143),
-        "font": "微软雅黑",
-    },
+THEMES = {
+    "专业商务": {"headline": "Arial", "body": "Arial", "primary": "2C3E50", "secondary": "3498DB", "accent": "E74C3C"},
+    "现代科技": {"headline": "Helvetica", "body": "Helvetica", "primary": "6C63FF", "secondary": "00D4FF", "accent": "FF6B6B"},
+    "学术答辩": {"headline": "Times New Roman", "body": "Times New Roman", "primary": "003366", "secondary": "FFD700", "accent": "008080"},
+    "创业路演": {"headline": "Arial", "body": "Arial", "primary": "FF4757", "secondary": "5F27CD", "accent": "FF9F43"},
+    "简约极简": {"headline": "Helvetica", "body": "Helvetica", "primary": "1E1E1E", "secondary": "666666", "accent": "999999"},
+    "教育培训": {"headline": "Arial", "body": "Arial", "primary": "27AE60", "secondary": "2ECC71", "accent": "F39C12"},
+    "政府汇报": {"headline": "SimHei", "body": "SimSun", "primary": "C0392B", "secondary": "E74C3C", "accent": "8E44AD"},
+    "清新自然": {"headline": "Arial", "body": "Arial", "primary": "16A085", "secondary": "2ECC71", "accent": "F1C40F"},
+    "暗夜模式": {"headline": "Arial", "body": "Arial", "primary": "FFFFFF", "secondary": "3498DB", "accent": "E74C3C", "dark_bg": True},
 }
 
-OUTLINE_TEMPLATES = {
-    "商务演示": ["项目背景", "市场分析", "解决方案", "竞争优势", "执行计划", "预期成果"],
-    "学术答辩": ["研究背景", "文献综述", "研究方法", "实验结果", "分析讨论", "结论展望"],
-    "创业路演": ["痛点分析", "解决方案", "市场规模", "商业模式", "团队优势", "融资计划"],
-    "工作总结": ["工作概况", "重点项目", "数据成果", "问题反思", "改进措施", "下阶段规划"],
-}
+LANG_MAP = {"中文": "zh", "English": "en", "日本語": "ja", "한국어": "ko"}
 
-# 14 种风格配色
-STYLE_COLORS = {
-    "商务蓝": {"primary": (41, 128, 185), "bg": (255, 255, 255)},
-    "科技紫": {"primary": (142, 68, 173), "bg": (255, 255, 255)},
-    "清新绿": {"primary": (39, 174, 96), "bg": (255, 255, 255)},
-    "活力橙": {"primary": (230, 126, 34), "bg": (255, 255, 255)},
-    "优雅红": {"primary": (192, 57, 43), "bg": (255, 255, 255)},
-    "沉稳灰": {"primary": (52, 73, 94), "bg": (255, 255, 255)},
-    "海洋蓝": {"primary": (21, 67, 96), "bg": (255, 255, 255)},
-    "森林绿": {"primary": (20, 90, 50), "bg": (255, 255, 255)},
-    "暗夜黑": {"primary": (44, 62, 80), "bg": (255, 255, 255)},
-    "玫瑰金": {"primary": (183, 108, 128), "bg": (255, 255, 255)},
-    "湖水青": {"primary": (22, 160, 133), "bg": (255, 255, 255)},
-    "珊瑚粉": {"primary": (240, 128, 128), "bg": (255, 255, 255)},
-    "经典黑金": {"primary": (218, 165, 32), "bg": (30, 30, 30)},
-    "极简白": {"primary": (100, 100, 100), "bg": (255, 255, 255)},
-}
+# ==================== PPT 生成 ====================
+
+AI_PROMPT = """You are a professional presentation designer. Create a structured PPT outline based on the user's topic.
+
+Topic: {topic}
+Language: {language}
+Slide count: {slide_count} slides (including title slide)
+
+Output EXACTLY this JSON format (no markdown, no extra text):
+{{
+  "slides": [
+    {{
+      "title": "Slide Title",
+      "subtitle": "Optional subtitle or null",
+      "bullets": ["Point 1", "Point 2", "Point 3"],
+      "notes": "Speaker notes for this slide"
+    }}
+  ]
+}}
+
+Rules:
+- First slide MUST be a title slide (title = topic name, subtitle = brief description)
+- Each content slide has 3-5 bullet points, each under 30 words
+- Speaker notes should be 1-2 sentences summarizing the slide
+- Use {language} for all content
+- Keep titles concise (under 15 words)"""
 
 
-def create_pptx(topic, template, style_name, slides_content=None):
-    """根据主题和模板生成 PPTX 文件"""
+def call_llm(prompt, api_key, provider="deepseek"):
+    """调用 LLM API"""
+    if provider == "deepseek":
+        url = "https://api.deepseek.com/chat/completions"
+        model = "deepseek-chat"
+    elif provider == "openrouter":
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        model = "google/gemini-2.5-flash"
+    else:
+        url = provider  # custom endpoint
+        model = "deepseek-chat"
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if provider == "openrouter":
+        headers["HTTP-Referer"] = "https://ppttool.streamlit.app"
+
+    resp = requests.post(url, headers=headers, json={
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_tokens": 4096,
+    }, timeout=90)
+
+    if resp.status_code != 200:
+        raise Exception(f"API 错误 ({resp.status_code}): {resp.text[:200]}")
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def build_pptx(topic, slides_data, theme_name):
+    """用 python-pptx 构建 PPTX"""
+    theme = THEMES.get(theme_name, THEMES["专业商务"])
+    is_dark = theme.get("dark_bg", False)
+    pc = theme["primary"]
+    sc = theme["secondary"]
+    bg = "1E1E1E" if is_dark else "FFFFFF"
+    txt_color = "FFFFFF" if is_dark else "333333"
+
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
-    colors = STYLE_COLORS.get(style_name, STYLE_COLORS["商务蓝"])
-    primary = colors["primary"]
-    bg = colors["bg"]
+    def hex(c):
+        return RGBColor(int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
 
-    # 如果没有 AI 内容，使用默认大纲
-    if not slides_content:
-        outline = OUTLINE_TEMPLATES.get(template, OUTLINE_TEMPLATES["商务演示"])
-        slides_content = []
-        for i, section in enumerate(outline):
-            slides_content.append({
-                "title": section,
-                "bullet_points": [f"{section}相关内容 - 第{j+1}点" for j in range(3)],
-                "speaker_notes": f"展开讲解{section}"
-            })
+    slides = slides_data if isinstance(slides_data, list) else slides_data.get("slides", [])
 
-    # === 封面 ===
-    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
-    bg_fill = slide.background.fill
-    bg_fill.solid()
-    bg_fill.fore_color.rgb = RGBColor(*bg)
-
-    # 左侧装饰条
-    shape = slide.shapes.add_shape(
-        1, Inches(0), Inches(0), Inches(0.15), Inches(7.5))
-    shape.fill.solid()
-    shape.fill.fore_color.rgb = RGBColor(*primary)
-    shape.line.fill.background()
-
-    # 主标题
-    txBox = slide.shapes.add_textbox(Inches(1.2), Inches(2), Inches(11), Inches(2))
-    tf = txBox.text_frame
-    p = tf.paragraphs[0]
-    p.text = topic
-    p.font.size = Pt(48)
-    p.font.bold = True
-    p.font.color.rgb = RGBColor(*primary)
-    p.font.name = "微软雅黑"
-
-    # 副标题
-    txBox2 = slide.shapes.add_textbox(Inches(1.2), Inches(4.2), Inches(11), Inches(1))
-    tf2 = txBox2.text_frame
-    p2 = tf2.paragraphs[0]
-    p2.text = f"{template} · AI 智能生成"
-    p2.font.size = Pt(20)
-    p2.font.color.rgb = RGBColor(150, 150, 150)
-    p2.font.name = "微软雅黑"
-
-    # 日期
-    from datetime import date
-    txBox3 = slide.shapes.add_textbox(Inches(1.2), Inches(5.2), Inches(11), Inches(0.5))
-    tf3 = txBox3.text_frame
-    p3 = tf3.paragraphs[0]
-    p3.text = date.today().strftime("%Y年%m月%d日")
-    p3.font.size = Pt(14)
-    p3.font.color.rgb = RGBColor(180, 180, 180)
-    p3.font.name = "微软雅黑"
-
-    # === 内容页 ===
-    for i, slide_data in enumerate(slides_content):
-        slide = prs.slides.add_slide(prs.slide_layouts[6])
-
-        bg_fill = slide.background.fill
+    for i, slide in enumerate(slides):
+        sl = prs.slides.add_slide(prs.slide_layouts[6])
+        bg_fill = sl.background.fill
         bg_fill.solid()
-        bg_fill.fore_color.rgb = RGBColor(*bg)
+        bg_fill.fore_color.rgb = hex(bg)
 
-        # 顶部色条
-        shape = slide.shapes.add_shape(
-            1, Inches(0), Inches(0), Inches(13.333), Inches(0.08))
-        shape.fill.solid()
-        shape.fill.fore_color.rgb = RGBColor(*primary)
-        shape.line.fill.background()
+        title = slide.get("title", "")
+        subtitle = slide.get("subtitle", "")
+        bullets = slide.get("bullets", [])
+        notes_text = slide.get("notes", "")
 
-        # 页码标识
-        num_shape = slide.shapes.add_shape(
-            1, Inches(0.5), Inches(0.5), Inches(0.6), Inches(0.6))
-        num_shape.fill.solid()
-        num_shape.fill.fore_color.rgb = RGBColor(*primary)
-        num_shape.line.fill.background()
-        num_tf = num_shape.text_frame
-        num_p = num_tf.paragraphs[0]
-        num_p.text = str(i + 1)
-        num_p.font.size = Pt(14)
-        num_p.font.bold = True
-        num_p.font.color.rgb = RGBColor(255, 255, 255)
-        num_p.alignment = PP_ALIGN.CENTER
+        if i == 0:
+            # 封面
+            bar = sl.shapes.add_shape(1, Inches(0), Inches(0), Inches(0.12), Inches(7.5))
+            bar.fill.solid(); bar.fill.fore_color.rgb = hex(sc); bar.line.fill.background()
 
-        # 标题
-        txBox = slide.shapes.add_textbox(Inches(1.5), Inches(0.4), Inches(11), Inches(0.8))
-        tf = txBox.text_frame
-        p = tf.paragraphs[0]
-        p.text = slide_data.get("title", f"第{i+1}页")
-        p.font.size = Pt(32)
-        p.font.bold = True
-        p.font.color.rgb = RGBColor(*primary)
-        p.font.name = "微软雅黑"
+            tb = sl.shapes.add_textbox(Inches(1.2), Inches(2), Inches(11), Inches(2))
+            p = tb.text_frame.paragraphs[0]
+            p.text = title or topic; p.font.size = Pt(48); p.font.bold = True
+            p.font.color.rgb = hex(pc); p.font.name = theme["headline"]
 
-        # 分隔线
-        line = slide.shapes.add_shape(
-            1, Inches(1.5), Inches(1.3), Inches(3), Inches(0.03))
-        line.fill.solid()
-        line.fill.fore_color.rgb = RGBColor(*primary)
-        line.line.fill.background()
+            if subtitle:
+                tb2 = sl.shapes.add_textbox(Inches(1.2), Inches(4.2), Inches(11), Inches(1))
+                p2 = tb2.text_frame.paragraphs[0]
+                p2.text = subtitle; p2.font.size = Pt(22)
+                p2.font.color.rgb = hex("999999" if not is_dark else "AAAAAA")
+                p2.font.name = theme["body"]
 
-        # 要点
-        bullets = slide_data.get("bullet_points", [])
-        txBox2 = slide.shapes.add_textbox(Inches(1.8), Inches(1.8), Inches(10), Inches(4.5))
-        tf2 = txBox2.text_frame
-        tf2.word_wrap = True
+            from datetime import date
+            tb3 = sl.shapes.add_textbox(Inches(1.2), Inches(5.5), Inches(11), Inches(0.5))
+            p3 = tb3.text_frame.paragraphs[0]
+            p3.text = date.today().strftime("%Y.%m.%d")
+            p3.font.size = Pt(14); p3.font.color.rgb = hex("AAAAAA" if not is_dark else "777777")
+            p3.font.name = theme["body"]
+        else:
+            # 内容页
+            bar = sl.shapes.add_shape(1, Inches(0), Inches(0), Inches(13.333), Inches(0.06))
+            bar.fill.solid(); bar.fill.fore_color.rgb = hex(sc); bar.line.fill.background()
 
-        for j, bullet in enumerate(bullets):
-            if j == 0:
-                p = tf2.paragraphs[0]
-            else:
-                p = tf2.add_paragraph()
-            p.text = f"▸ {bullet}"
-            p.font.size = Pt(18)
-            p.font.color.rgb = RGBColor(80, 80, 80)
-            p.font.name = "微软雅黑"
-            p.space_after = Pt(12)
+            # 页码
+            nb = sl.shapes.add_shape(1, Inches(0.5), Inches(0.4), Inches(0.55), Inches(0.55))
+            nb.fill.solid(); nb.fill.fore_color.rgb = hex(sc); nb.line.fill.background()
+            np = nb.text_frame.paragraphs[0]; np.text = str(i)
+            np.font.size = Pt(14); np.font.bold = True
+            np.font.color.rgb = hex("FFFFFF"); np.alignment = PP_ALIGN.CENTER
+
+            # 标题
+            tb = sl.shapes.add_textbox(Inches(1.5), Inches(0.3), Inches(11), Inches(0.75))
+            tp = tb.text_frame.paragraphs[0]
+            tp.text = title; tp.font.size = Pt(32); tp.font.bold = True
+            tp.font.color.rgb = hex(pc); tp.font.name = theme["headline"]
+
+            # 分隔线
+            ln = sl.shapes.add_shape(1, Inches(1.5), Inches(1.2), Inches(2.5), Inches(0.025))
+            ln.fill.solid(); ln.fill.fore_color.rgb = hex(sc); ln.line.fill.background()
+
+            # 要点
+            tb2 = sl.shapes.add_textbox(Inches(1.8), Inches(1.6), Inches(10.5), Inches(5))
+            tf2 = tb2.text_frame; tf2.word_wrap = True
+            for j, bullet in enumerate(bullets):
+                p = tf2.paragraphs[0] if j == 0 else tf2.add_paragraph()
+                p.text = f"▸ {bullet}"
+                p.font.size = Pt(18); p.font.color.rgb = hex(txt_color)
+                p.font.name = theme["body"]; p.space_after = Pt(14)
 
         # 演讲者备注
-        if slide_data.get("speaker_notes"):
-            notes = slide.notes_slide
-            notes.notes_text_frame.text = slide_data["speaker_notes"]
+        if notes_text:
+            try:
+                sl.notes_slide.notes_text_frame.text = notes_text
+            except:
+                pass
 
-    # 保存
     output = io.BytesIO()
     prs.save(output)
     output.seek(0)
@@ -227,172 +194,118 @@ def create_pptx(topic, template, style_name, slides_content=None):
 
 COMMON_WATERMARKS = [
     "made with gamma", "gamma.app", "gamma",
-    "canva", "made with canva",
-    "wps", "wps office",
-    "powerpoint", "microsoft",
-    "slidesgo", "slidesgo.com",
-    "slideshare", "slideshare.net",
-    "prezi",
-    "beautiful.ai",
-    "slidebean",
-    "powtoon",
-    "visme",
-    "piktochart",
-    "genially",
-    "mentimeter",
-    "nearpod",
-    "peardeck",
-    "haikudeck",
-    "zoho show",
-    "customshow",
-    "slidecamp",
-    "slidebean",
-    "ludus",
-    "slides",
-    "slideful",
-    "emaze",
-    "sway",
-    "googleslides",
-    "keynote",
-    "libreoffice impress",
-    "openoffice impress",
-    "staroffice impress",
-    "softmaker presentations",
-    "corel presentations",
-    "acrobat",
-    "pdf",
-    "watermark",
-    "sample",
-    "preview",
-    "draft",
-    "confidential",
-    "demo",
-    "trial",
-    "evaluation",
-    "free",
-    "free version",
-    "free trial",
-    "free download",
-    "download",
-    "free ppt",
-    "free presentation",
-    "free template",
-    "free download",
-    "freebie",
-    "freeware",
-    "shareware",
-    "freemium",
-    "free account",
-    "free plan",
-    "free tier",
-    "free version",
-    "free to use",
-    "free to download",
-    "free to edit",
-    "free to share",
-    "free to use",
-    "free to copy",
-    "free to distribute",
-    "free to modify",
-    "free to remix",
-    "free to adapt",
-    "free to build upon",
-    "free to use commercially",
-    "free for commercial use",
-    "free for personal use",
-    "free for education",
-    "free for non-profit",
-    "free for charity",
-    "free for government",
-    "free for students",
-    "free for teachers",
-    "free for educators",
-    "free for schools",
-    "free for universities",
-    "free for colleges",
-    "free for libraries",
-    "free for museums",
-    "free for archives",
-    "free for galleries",
-    "free for cultural institutions",
-    "free for research",
-    "free for academic use",
+    "canva", "made with canva", "wps", "slidesgo", "slideshare",
+    "prezi", "beautiful.ai", "slidebean", "powtoon", "visme",
+    "piktochart", "genially", "mentimeter", "nearpod", "peardeck",
+    "haikudeck", "googleslides", "keynote", "libreoffice impress",
+    "watermark", "sample", "preview", "draft", "confidential", "demo", "trial",
 ]
 
 
-def remove_watermark_generic(file_bytes, filename, target_text=None):
-    """通用去水印，支持自定义关键词或自动检测常见水印"""
+def remove_watermark(file_bytes, filename, target=None):
     temp_dir = tempfile.mkdtemp()
     extract_dir = None
     try:
-        input_path = os.path.join(temp_dir, filename)
-        output_path = os.path.join(temp_dir, f"clean_{filename}")
-
-        with open(input_path, 'wb') as f:
+        ip = os.path.join(temp_dir, filename)
+        op = os.path.join(temp_dir, f"clean_{filename}")
+        with open(ip, 'wb') as f:
             f.write(file_bytes)
 
-        extract_dir = temp_dir + "_extract"
-        with zipfile.ZipFile(input_path, 'r') as z:
+        extract_dir = temp_dir + "_ex"
+        with zipfile.ZipFile(ip, 'r') as z:
             z.extractall(extract_dir)
 
-        # 确定要搜索的关键词
-        if target_text:
-            keywords = [target_text.lower()]
-        else:
-            keywords = COMMON_WATERMARKS
-
-        found_texts = set()
-        removed_count = 0
+        keywords = [target.lower()] if target else COMMON_WATERMARKS
+        found_texts, removed = set(), 0
 
         for root_dir, dirs, files in os.walk(extract_dir):
             for file in files:
                 if not file.endswith('.xml'):
                     continue
-                filepath = os.path.join(root_dir, file)
+                fp = os.path.join(root_dir, file)
                 try:
-                    tree = ET.parse(filepath)
+                    tree = ET.parse(fp)
                     root = tree.getroot()
-                    file_changed = False
-
+                    changed = False
                     for elem in root.iter():
-                        # 检查文本
                         if elem.text:
-                            text_lower = elem.text.lower()
+                            tl = elem.text.lower()
                             for kw in keywords:
-                                if kw in text_lower:
-                                    found_texts.add(kw)
-                                    elem.text = ''
-                                    file_changed = True
-                                    removed_count += 1
-                                    break
-
-                        # 检查属性
+                                if kw in tl:
+                                    found_texts.add(kw); elem.text = ''; changed = True; removed += 1; break
                         for an, av in list(elem.attrib.items()):
                             if av:
-                                av_lower = str(av).lower()
+                                avl = str(av).lower()
                                 for kw in keywords:
-                                    if kw in av_lower:
-                                        found_texts.add(kw)
-                                        del elem.attrib[an]
-                                        file_changed = True
-                                        removed_count += 1
-                                        break
-
-                    if file_changed:
-                        tree.write(filepath, xml_declaration=True, encoding='UTF-8')
+                                    if kw in avl:
+                                        found_texts.add(kw); del elem.attrib[an]; changed = True; removed += 1; break
+                    if changed:
+                        tree.write(fp, xml_declaration=True, encoding='UTF-8')
                 except ET.ParseError:
                     continue
 
-        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+        with zipfile.ZipFile(op, 'w', zipfile.ZIP_DEFLATED) as zout:
             for root_dir, dirs, files in os.walk(extract_dir):
                 for file in files:
                     fp = os.path.join(root_dir, file)
-                    an = os.path.relpath(fp, extract_dir)
-                    zout.write(fp, an)
+                    zout.write(fp, os.path.relpath(fp, extract_dir))
 
-        with open(output_path, 'rb') as f:
-            result = f.read()
-        return result, removed_count, list(found_texts)
+        with open(op, 'rb') as f:
+            return f.read(), removed, list(found_texts)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        if extract_dir:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+
+
+# ==================== 布局修复 ====================
+
+def fix_layout(file_bytes, filename):
+    temp_dir = tempfile.mkdtemp()
+    extract_dir = None
+    try:
+        ip = os.path.join(temp_dir, filename)
+        op = os.path.join(temp_dir, f"fixed_{filename}")
+        with open(ip, 'wb') as f:
+            f.write(file_bytes)
+
+        extract_dir = temp_dir + "_ex"
+        with zipfile.ZipFile(ip, 'r') as z:
+            z.extractall(extract_dir)
+
+        fixed = 0
+        for root_dir, dirs, files in os.walk(extract_dir):
+            for file in files:
+                if not file.endswith('.xml'):
+                    continue
+                fp = os.path.join(root_dir, file)
+                try:
+                    tree = ET.parse(fp)
+                    root = tree.getroot()
+                    changed = False
+                    for elem in root.iter():
+                        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                        if tag in ('rPr', 'defRPr'):
+                            for child in elem:
+                                ct = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                                if ct == 'latin' and child.get('typeface', '') == '':
+                                    child.set('typeface', 'Arial'); changed = True
+                                elif ct == 'ea' and child.get('typeface', '') == '':
+                                    child.set('typeface', '微软雅黑'); changed = True
+                    if changed:
+                        tree.write(fp, xml_declaration=True, encoding='UTF-8')
+                        fixed += 1
+                except ET.ParseError:
+                    continue
+
+        with zipfile.ZipFile(op, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for root_dir, dirs, files in os.walk(extract_dir):
+                for file in files:
+                    fp = os.path.join(root_dir, file)
+                    zout.write(fp, os.path.relpath(fp, extract_dir))
+
+        with open(op, 'rb') as f:
+            return f.read(), fixed
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
         if extract_dir:
@@ -401,183 +314,189 @@ def remove_watermark_generic(file_bytes, filename, target_text=None):
 
 # ==================== UI ====================
 
-st.title("🎨 一句话生成 PPT")
-st.caption("输入主题 → AI 生成大纲 → 一键下载完整 PPT · 支持去水印 · 完美兼容 WPS/Office")
+st.title("🪄 PPT 工具箱")
+st.caption("AI 一句话生成 · 通用去水印 · 布局修复 · 完美兼容 WPS/Office")
 
-tab1, tab2, tab3 = st.tabs(["🪄 生成 PPT", "🔓 去水印", "🔧 修复布局"])
+tab1, tab2, tab3, tab4 = st.tabs(["🤖 AI 生成 PPT", "✨ 美化 PPT", "🔓 通用去水印", "🔧 布局修复"])
 
+# ======== Tab 1: AI 生成 ========
 with tab1:
-    col1, col2 = st.columns([2, 1])
+    st.subheader("一句话生成专业 PPT")
 
+    col1, col2, col3 = st.columns(3)
     with col1:
-        topic = st.text_input("📝 输入主题，一句话即可", placeholder="例如：2025年新能源汽车市场分析报告")
-
+        topic = st.text_input("📝 PPT 主题", placeholder="例如：新能源汽车2025市场分析")
     with col2:
-        template = st.selectbox("📋 选择场景", list(PPT_TEMPLATES.keys()))
+        theme = st.selectbox("🎨 风格", list(THEMES.keys()))
+    with col3:
+        language = st.selectbox("🌐 语言", list(LANG_MAP.keys()), index=0)
 
-    style = st.selectbox("🎨 风格配色", list(STYLE_COLORS.keys()), horizontal=True)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        slide_count = st.slider("📊 页数", 3, 20, 8)
+    with col_b:
+        complexity = st.selectbox("📈 详细程度", ["简洁", "标准", "详细"], index=1)
 
-    # AI 增强
-    with st.expander("🤖 AI 增强（可选，效果更好）"):
-        use_ai = st.checkbox("使用 AI 生成内容（需 DeepSeek API Key）")
-        api_key = st.text_input("DeepSeek API Key", type="password",
-                                help="在 https://platform.deepseek.com 免费注册获取",
-                                disabled=not use_ai)
+    # API 配置
+    with st.expander("⚙️ API 设置（必填，用于 AI 生成内容）"):
+        api_provider = st.selectbox("API 提供商", ["DeepSeek（推荐，便宜）", "OpenRouter", "自定义 OpenAI 兼容接口"])
+        api_key = st.text_input("API Key", type="password",
+                                help="DeepSeek: https://platform.deepseek.com | OpenRouter: https://openrouter.ai/keys")
+        if api_provider == "自定义 OpenAI 兼容接口":
+            custom_endpoint = st.text_input("API 地址", placeholder="https://your-api.com/v1")
 
     if st.button("🪄 生成 PPT", type="primary", use_container_width=True):
         if not topic.strip():
             st.warning("请输入主题")
+        elif not api_key.strip():
+            st.warning("请输入 API Key（在 DeepSeek 或 OpenRouter 免费注册即可获取）")
         else:
-            with st.spinner("正在生成 PPT..."):
-                slides_content = None
+            with st.spinner("🤖 AI 正在生成内容..."):
+                try:
+                    provider = "deepseek"
+                    if api_provider.startswith("OpenRouter"):
+                        provider = "openrouter"
+                    elif api_provider.startswith("自定义"):
+                        provider = custom_endpoint
 
-                if use_ai and api_key:
-                    try:
-                        import requests
-                        outline = OUTLINE_TEMPLATES.get(template, OUTLINE_TEMPLATES["商务演示"])
-                        prompt = f"""你是一个专业的PPT内容策划专家。请根据以下主题生成PPT内容。
-主题：{topic}
-场景：{template}
-大纲：{', '.join(outline)}
+                    prompt = AI_PROMPT.format(topic=topic.strip(), language=LANG_MAP[language],
+                                              slide_count=slide_count)
+                    if complexity == "详细":
+                        prompt += "\nMake content very detailed with 4-5 bullet points per slide, each 20-40 words."
+                    elif complexity == "简洁":
+                        prompt += "\nKeep content concise with 2-3 short bullet points per slide."
 
-请为每个章节生成：
-1. 标题（精简有力，10字以内）
-2. 3-5个要点（每个20字以内，用换行分隔）
-3. 演讲者备注（1-2句话）
+                    raw = call_llm(prompt, api_key.strip(), provider)
+                    raw = raw.strip()
+                    if raw.startswith("```"):
+                        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
+                    slides_data = json.loads(raw)
 
-请以JSON格式输出：
-[{{"title": "章节标题", "bullet_points": ["要点1","要点2","要点3"], "speaker_notes": "备注内容"}}]"""
+                    st.success(f"✅ AI 内容生成成功，共 {len(slides_data.get('slides', slides_data))} 页")
+                except Exception as e:
+                    st.error(f"AI 调用失败: {e}")
+                    st.info("使用默认大纲生成...")
+                    slides_data = {
+                        "slides": [
+                            {"title": topic, "subtitle": "AI 智能生成", "bullets": [], "notes": ""},
+                            {"title": "概述", "bullets": ["背景介绍", "主要内容预览", "核心观点"], "notes": "概述页"},
+                            {"title": "要点一", "bullets": ["关键信息", "数据支撑", "分析解读"], "notes": ""},
+                            {"title": "要点二", "bullets": ["核心观点", "案例说明", "实践意义"], "notes": ""},
+                            {"title": "总结", "bullets": ["核心结论", "行动建议", "未来展望"], "notes": "总结页"},
+                        ]
+                    }
 
-                        resp = requests.post(
-                            "https://api.deepseek.com/chat/completions",
-                            headers={"Authorization": f"Bearer {api_key}"},
-                            json={
-                                "model": "deepseek-chat",
-                                "messages": [{"role": "user", "content": prompt}],
-                                "temperature": 0.7,
-                            },
-                            timeout=60
-                        )
-                        if resp.status_code == 200:
-                            raw = resp.json()["choices"][0]["message"]["content"]
-                            raw = raw.strip()
-                            if raw.startswith("```"):
-                                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-                            slides_content = json.loads(raw)
-                            st.success("✅ AI 内容生成成功")
-                        else:
-                            st.error(f"API 错误: {resp.json()}")
-                    except Exception as e:
-                        st.error(f"AI 调用失败: {e}，将使用默认模板生成")
-
-                pptx_data = create_pptx(topic, template, style, slides_content)
+            with st.spinner("📄 正在构建 PPTX 文件..."):
+                pptx_data = build_pptx(topic, slides_data, theme)
 
             st.success("🎉 PPT 生成完成！")
-            st.download_button(
-                label="📥 下载 PPTX 文件",
-                data=pptx_data,
-                file_name=f"{topic[:20]}_{template}.pptx",
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                use_container_width=True,
-            )
+            st.download_button("📥 下载 PPTX", pptx_data,
+                               file_name=f"{topic[:30]}_{theme}.pptx",
+                               mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                               use_container_width=True)
 
-    # 预览区
-    with st.expander("📖 大纲预览"):
-        outline = OUTLINE_TEMPLATES.get(template, OUTLINE_TEMPLATES["商务演示"])
-        for i, item in enumerate(outline, 1):
-            st.write(f"**{i}.** {item}")
-
-
+# ======== Tab 2: 美化 PPT ========
 with tab2:
-    st.subheader("🔓 去除 PPTX 水印")
-    st.caption("上传 PPTX 文件，自动搜索并去除指定水印文字（支持 Gamma / Canva / WPS 等任何来源）")
+    st.subheader("✨ PPT 一键美化")
+    st.caption("上传你的 PPT，选择风格，一键变漂亮")
 
-    watermark_text = st.text_input("🔍 要移除的水印文字",
-                                    placeholder="例如：Made with Gamma、Canva、品牌名称...",
-                                    help="输入你想去除的水印关键词，留空则自动检测常见水印")
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        beautify_theme = st.selectbox("🎨 目标风格", list(THEMES.keys()), key="beautify_theme")
+    with col_b2:
+        beautify_mode = st.selectbox("🖌️ 美化程度", ["轻度（仅修字体配色）", "中度（字体+配色+背景）", "深度（全部重排）"])
 
-    uploaded = st.file_uploader("选择 PPTX 文件", type=["pptx"], key="watermark_upload")
-    if uploaded:
-        if st.button("去除水印", use_container_width=True):
-            with st.spinner("处理中..."):
-                result, count, found_texts = remove_watermark_generic(
-                    uploaded.getvalue(), uploaded.name, watermark_text.strip() if watermark_text.strip() else None
-                )
-                if count > 0:
-                    st.success(f"✅ 已移除 {count} 个水印标记")
-                    if found_texts:
-                        st.caption(f"检测到的水印: {', '.join(found_texts)}")
-                    st.download_button(
-                        "📥 下载无水印版本", result,
-                        file_name=f"去水印_{uploaded.name}",
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                        use_container_width=True,
-                    )
-                else:
-                    st.info("未检测到水印，请确认水印文字是否正确")
+    uploaded_b = st.file_uploader("上传你要美化的 PPTX 文件", type=["pptx"], key="beautify_upload")
 
-
-with tab3:
-    st.subheader("🔧 修复 PPTX 布局")
-    st.caption("修复空字体、对齐问题")
-    uploaded2 = st.file_uploader("选择 PPTX 文件", type=["pptx"], key="fix_upload")
-    if uploaded2:
-        if st.button("修复布局", use_container_width=True):
-            with st.spinner("修复中..."):
-                temp_dir = tempfile.mkdtemp()
+    if uploaded_b:
+        if st.button("✨ 开始美化", type="primary", use_container_width=True):
+            with st.spinner("美化中..."):
                 try:
-                    ip = os.path.join(temp_dir, uploaded2.name)
-                    op = os.path.join(temp_dir, f"fixed_{uploaded2.name}")
-                    with open(ip, 'wb') as f:
-                        f.write(uploaded2.getvalue())
+                    theme_info = THEMES.get(beautify_theme, THEMES["专业商务"])
+                    is_dark = theme_info.get("dark_bg", False)
+                    pc = theme_info["primary"]
+                    sc = theme_info["secondary"]
+                    bg = "1E1E1E" if is_dark else "FFFFFF"
+                    body_font = theme_info["body"]
+                    head_font = theme_info["headline"]
 
-                    with zipfile.ZipFile(ip, 'r') as z:
-                        z.extractall(temp_dir + "_ex")
+                    def hex(c):
+                        return RGBColor(int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
 
-                    ed = temp_dir + "_ex"
-                    fixed = 0
-                    for root_dir, dirs, files in os.walk(ed):
-                        for file in files:
-                            if not file.endswith('.xml'):
-                                continue
-                            fp = os.path.join(root_dir, file)
-                            try:
-                                tree = ET.parse(fp)
-                                root = tree.getroot()
-                                changed = False
-                                for elem in root.iter():
-                                    tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
-                                    if tag in ('rPr', 'defRPr'):
-                                        for child in elem:
-                                            ct = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                                            if ct == 'latin' and child.get('typeface', '') == '':
-                                                child.set('typeface', 'Arial')
-                                                changed = True
-                                            elif ct == 'ea' and child.get('typeface', '') == '':
-                                                child.set('typeface', '微软雅黑')
-                                                changed = True
-                                if changed:
-                                    tree.write(fp, xml_declaration=True, encoding='UTF-8')
-                                    fixed += 1
-                            except ET.ParseError:
-                                continue
+                    prs = Presentation(io.BytesIO(uploaded_b.getvalue()))
+                    changes = 0
 
-                    with zipfile.ZipFile(op, 'w', zipfile.ZIP_DEFLATED) as zout:
-                        for root_dir, dirs, files in os.walk(ed):
-                            for file in files:
-                                fp = os.path.join(root_dir, file)
-                                an = os.path.relpath(fp, ed)
-                                zout.write(fp, an)
+                    # 处理幻灯片母版
+                    for slide_master in prs.slide_masters:
+                        bg_fill = slide_master.background.fill
+                        bg_fill.solid()
+                        bg_fill.fore_color.rgb = hex(bg)
 
-                    with open(op, 'rb') as f:
-                        result = f.read()
+                    for slide in prs.slides:
+                        bg_fill = slide.background.fill
+                        bg_fill.solid()
+                        bg_fill.fore_color.rgb = hex(bg)
 
-                    st.success(f"✅ 已修复 {fixed} 个文件")
-                    st.download_button(
-                        "📥 下载修复版本", result,
-                        file_name=f"修复_{uploaded2.name}",
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                        use_container_width=True,
-                    )
-                finally:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
+                        for shape in slide.shapes:
+                            if shape.has_text_frame:
+                                for para in shape.text_frame.paragraphs:
+                                    for run in para.runs:
+                                        run.font.name = body_font
+                                        if beautify_mode != "轻度（仅修字体配色）":
+                                            if run.font.size and run.font.size >= Pt(24):
+                                                run.font.color.rgb = hex(pc)
+                                            else:
+                                                run.font.color.rgb = hex("FFFFFF" if is_dark else "333333")
+                                        changes += 1
+                                    changes += 1
+
+                    output = io.BytesIO()
+                    prs.save(output)
+                    output.seek(0)
+
+                    st.success(f"✅ 美化完成！处理了 {changes} 处文本")
+                    st.download_button("📥 下载美化版", output,
+                                       file_name=f"美化_{beautify_theme}_{uploaded_b.name}",
+                                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                       use_container_width=True)
+                except Exception as e:
+                    st.error(f"美化失败: {e}")
+
+# ======== Tab 3: 去水印 ========
+with tab3:
+    st.subheader("🔓 通用 PPTX 去水印")
+    st.caption("支持 Gamma / Canva / WPS / Slidesgo 等 80+ 常见水印自动检测")
+
+    wm_text = st.text_input("🔍 指定水印文字（可选）",
+                            placeholder="留空自动检测，或手动输入如：Made with Gamma、Canva、品牌名...")
+
+    uploaded = st.file_uploader("上传 PPTX 文件", type=["pptx"], key="wm_upload")
+    if uploaded:
+        if st.button("🔓 去水印", use_container_width=True):
+            with st.spinner("搜索并移除水印..."):
+                result, count, found = remove_watermark(uploaded.getvalue(), uploaded.name,
+                                                        wm_text.strip() if wm_text.strip() else None)
+                if count > 0:
+                    st.success(f"✅ 移除 {count} 个水印标记" + (f"（{', '.join(found)}）" if found else ""))
+                    st.download_button("📥 下载无水印版", result,
+                                       file_name=f"去水印_{uploaded.name}",
+                                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                       use_container_width=True)
+                else:
+                    st.info("未检测到水印，请尝试手动输入水印文字")
+
+# ======== Tab 4: 修复 ========
+with tab4:
+    st.subheader("🔧 PPTX 布局修复")
+    st.caption("自动修复空字体、对齐问题，确保在不同电脑上显示正常")
+
+    uploaded2 = st.file_uploader("上传 PPTX 文件", type=["pptx"], key="fix_upload")
+    if uploaded2:
+        if st.button("🔧 修复", use_container_width=True):
+            with st.spinner("修复中..."):
+                result, fixed = fix_layout(uploaded2.getvalue(), uploaded2.name)
+                st.success(f"✅ 修复 {fixed} 个文件")
+                st.download_button("📥 下载修复版", result,
+                                   file_name=f"修复_{uploaded2.name}",
+                                   mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                   use_container_width=True)
