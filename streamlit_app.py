@@ -321,7 +321,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["🤖 AI 生成 PPT", "✨ 美化 PPT", "🔓 
 
 # ======== Tab 1: AI 生成 ========
 with tab1:
-    st.subheader("一句话生成专业 PPT")
+    st.subheader("一句话生成专业 PPT · 免 API 直接用")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -337,54 +337,88 @@ with tab1:
     with col_b:
         complexity = st.selectbox("📈 详细程度", ["简洁", "标准", "详细"], index=1)
 
-    # API 配置
-    with st.expander("⚙️ API 设置（必填，用于 AI 生成内容）"):
-        api_provider = st.selectbox("API 提供商", ["DeepSeek（推荐，便宜）", "OpenRouter", "自定义 OpenAI 兼容接口"])
-        api_key = st.text_input("API Key", type="password",
-                                help="DeepSeek: https://platform.deepseek.com | OpenRouter: https://openrouter.ai/keys")
-        if api_provider == "自定义 OpenAI 兼容接口":
-            custom_endpoint = st.text_input("API 地址", placeholder="https://your-api.com/v1")
+    # API 配置 - 改为可选
+    with st.expander("🤖 AI 增强（可选，效果更好）"):
+        use_ai = st.checkbox("启用 AI 生成内容（默认使用模板，无需 API）", value=False)
+        api_key = None
+        provider = "deepseek"
+        if use_ai:
+            api_provider = st.selectbox("API 提供商", ["DeepSeek（推荐）", "OpenRouter", "自定义接口"])
+            api_key = st.text_input("API Key", type="password",
+                                    help="DeepSeek: https://platform.deepseek.com | OpenRouter: https://openrouter.ai/keys")
+            if api_provider == "自定义接口":
+                custom_endpoint = st.text_input("API 地址", placeholder="https://your-api.com/v1/chat/completions")
 
     if st.button("🪄 生成 PPT", type="primary", use_container_width=True):
         if not topic.strip():
             st.warning("请输入主题")
-        elif not api_key.strip():
-            st.warning("请输入 API Key（在 DeepSeek 或 OpenRouter 免费注册即可获取）")
         else:
-            with st.spinner("🤖 AI 正在生成内容..."):
-                try:
-                    provider = "deepseek"
-                    if api_provider.startswith("OpenRouter"):
-                        provider = "openrouter"
-                    elif api_provider.startswith("自定义"):
-                        provider = custom_endpoint
+            slides_data = None
 
-                    prompt = AI_PROMPT.format(topic=topic.strip(), language=LANG_MAP[language],
-                                              slide_count=slide_count)
-                    if complexity == "详细":
-                        prompt += "\nMake content very detailed with 4-5 bullet points per slide, each 20-40 words."
-                    elif complexity == "简洁":
-                        prompt += "\nKeep content concise with 2-3 short bullet points per slide."
+            # AI 模式
+            if use_ai and api_key:
+                with st.spinner("🤖 AI 正在生成内容..."):
+                    try:
+                        if api_provider.startswith("OpenRouter"):
+                            provider = "openrouter"
+                        elif api_provider == "自定义接口":
+                            provider = custom_endpoint
 
-                    raw = call_llm(prompt, api_key.strip(), provider)
-                    raw = raw.strip()
-                    if raw.startswith("```"):
-                        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-                    slides_data = json.loads(raw)
+                        prompt = AI_PROMPT.format(topic=topic.strip(), language=LANG_MAP[language],
+                                                  slide_count=slide_count)
+                        if complexity == "详细":
+                            prompt += "\nMake content very detailed with 4-5 bullet points per slide."
+                        elif complexity == "简洁":
+                            prompt += "\nKeep content concise with 2-3 short bullet points."
 
-                    st.success(f"✅ AI 内容生成成功，共 {len(slides_data.get('slides', slides_data))} 页")
-                except Exception as e:
-                    st.error(f"AI 调用失败: {e}")
-                    st.info("使用默认大纲生成...")
+                        raw = call_llm(prompt, api_key.strip(), provider)
+                        raw = raw.strip()
+                        if raw.startswith("```"):
+                            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
+                        slides_data = json.loads(raw)
+                        st.success(f"✅ AI 内容生成成功")
+                    except Exception as e:
+                        st.error(f"AI 调用失败: {e}，改用模板生成")
+                        use_ai = False
+
+            # 模板模式（默认，无需 API）
+            if not use_ai or not api_key or not slides_data:
+                with st.spinner("📋 正在构建 PPT..."):
+                    # 根据主题智能拆分大纲
+                    outline_map = {
+                        "专业商务": ["项目背景与目标", "市场分析", "解决方案", "竞争优势", "实施计划", "预期成果"],
+                        "现代科技": ["行业趋势", "技术方案", "产品架构", "核心功能", "应用场景", "未来展望"],
+                        "学术答辩": ["研究背景与意义", "文献综述", "研究方法", "实验结果", "分析讨论", "结论与展望"],
+                        "创业路演": ["痛点与机会", "解决方案", "市场规模", "商业模式", "团队优势", "融资计划"],
+                        "教育培训": ["课程目标", "知识要点", "案例分析", "实践操作", "常见误区", "总结回顾"],
+                        "清新自然": ["背景介绍", "核心内容", "案例分享", "数据解读", "经验总结", "展望未来"],
+                    }
+                    outline = outline_map.get(theme, outline_map["专业商务"])
+
+                    # 确保页数匹配
+                    if slide_count <= len(outline) + 1:
+                        outline = outline[:slide_count - 1]
+                    else:
+                        while len(outline) < slide_count - 1:
+                            outline.append(f"补充内容 {len(outline) + 1}")
+
                     slides_data = {
                         "slides": [
-                            {"title": topic, "subtitle": "AI 智能生成", "bullets": [], "notes": ""},
-                            {"title": "概述", "bullets": ["背景介绍", "主要内容预览", "核心观点"], "notes": "概述页"},
-                            {"title": "要点一", "bullets": ["关键信息", "数据支撑", "分析解读"], "notes": ""},
-                            {"title": "要点二", "bullets": ["核心观点", "案例说明", "实践意义"], "notes": ""},
-                            {"title": "总结", "bullets": ["核心结论", "行动建议", "未来展望"], "notes": "总结页"},
+                            {"title": topic.strip(), "subtitle": f"{theme} · AI 智能生成", "bullets": [], "notes": ""}
                         ]
                     }
+                    for item in outline:
+                        slides_data["slides"].append({
+                            "title": item,
+                            "bullets": [
+                                f"{item} - 核心观点",
+                                f"{item} - 关键数据支撑",
+                                f"{item} - 实践案例分析",
+                            ],
+                            "notes": f"展开讲解{item}"
+                        })
+
+                    st.success(f"✅ 模板生成成功，共 {len(slides_data['slides'])} 页（免 API，秒出）")
 
             with st.spinner("📄 正在构建 PPTX 文件..."):
                 pptx_data = build_pptx(topic, slides_data, theme)
