@@ -95,29 +95,56 @@ OUTLINE_LIBRARY = {
     "政府汇报": ["工作概述", "重点任务", "进展成效", "问题分析", "改进措施", "下步计划"],
 }
 
-AI_SYSTEM_PROMPT = """你是一个专业的 PPT 内容策划专家。根据用户提供的描述生成结构化的 PPT 内容。
+AI_RESEARCH_PROMPT = """你是一个专业的 PPT 策划顾问。用户给了你一个主题，你需要像麦肯锡顾问一样，先研究这个主题的市场上顶级 PPT 应该包含什么内容。
 
-用户输入的可能是简短主题，也可能是详细描述。你需要根据内容长度和复杂度做出相应调整。
+主题：{topic}
+场景：{theme}
 
-输出严格的 JSON 格式（不要 markdown 代码块）：
-{
-  "title": "PPT 总标题",
-  "subtitle": "副标题",
-  "slides": [
-    {
-      "title": "页面标题",
-      "bullets": ["要点1", "要点2", "要点3"],
-      "notes": "演讲备注"
-    }
+请分析并返回 JSON：
+{{
+  "market_context": "这个主题的市场背景和当前热点（1-2句话）",
+  "target_audience": "目标听众是谁",
+  "key_angles": ["角度1", "角度2", "角度3"],
+  "data_sources": ["数据来源思路1", "数据来源思路2"],
+  "outline": [
+    {{"section": "章节标题", "focus": "这一章要讲什么核心内容", "keywords": ["关键词1", "关键词2"]}}
   ]
-}
+}}
 
-要求：
-- 包含封面页（title + subtitle）和 4-8 页内容
-- 每页 3-5 个要点，每个要点 15-40 字
-- 标题精简有力（15 字以内）
-- 如果用到了用户描述中的具体数据、案例，务必保留
-- 内容结构清晰，逻辑递进"""
+注意：返回的 outline 要包含封面页作为第一项，一共{slide_count}页左右。每页都要有明确的商业/学术价值。"""
+
+AI_GENERATE_PROMPT = """你是一个顶级的 PPT 内容撰写专家。基于以下研究报告，生成完整的 PPT 内容。
+
+## 用户原始主题
+{user_prompt}
+
+## AI 研究报告
+{research_result}
+
+## 要求
+- 场景：{theme}
+- 总页数：约{slide_count}页（含封面）
+- 语言：中文
+
+输出严格的 JSON（不要 markdown）：
+{{
+  "title": "PPT 主标题（抓人眼球，20字以内）",
+  "subtitle": "副标题或一句话概括",
+  "slides": [
+    {{
+      "title": "页面标题（精简有力）",
+      "bullets": ["具体要点1", "具体要点2", "具体要点3"],
+      "notes": "演讲备注"
+    }}
+  ]
+}}
+
+核心原则：
+- 每页要点必须有实质内容，不是空洞的套话
+- 如果研究报告中有数据方向，要点中要体现
+- 封面页的 subtitle 要有信息量，不只是场景名
+- 要点之间要有逻辑递进关系
+- 最后一页要是"总结/展望/行动建议"之类有推动感的内容"""
 
 # ==================== 注册 XML 命名空间 ====================
 
@@ -134,20 +161,12 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # ==================== AI PPT 生成 ====================
 
-def call_deepseek(prompt, max_tokens=4096):
+def call_deepseek(messages, max_tokens=4096):
     """调用 DeepSeek API"""
     resp = requests.post(
         "https://api.deepseek.com/chat/completions",
         headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": AI_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.7,
-            "max_tokens": max_tokens,
-        },
+        json={"model": "deepseek-chat", "messages": messages, "temperature": 0.7, "max_tokens": max_tokens},
         timeout=120,
     )
     if resp.status_code != 200:
@@ -155,13 +174,35 @@ def call_deepseek(prompt, max_tokens=4096):
     return resp.json()["choices"][0]["message"]["content"]
 
 
-def parse_ai_response(raw):
-    """解析 AI 返回的 JSON"""
+def parse_json(raw):
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r'^```\w*\n', '', raw)
         raw = re.sub(r'\n```$', '', raw)
     return json.loads(raw)
+
+
+def generate_ppt_content(prompt, theme, slide_count):
+    """两步生成法：先研究大纲 → 再写具体内容"""
+    # 第一步：研究大纲
+    research_msg = [
+        {"role": "user", "content": AI_RESEARCH_PROMPT.format(topic=prompt, theme=theme, slide_count=slide_count)}
+    ]
+    raw_research = call_deepseek(research_msg, 2048)
+    research = parse_json(raw_research)
+
+    # 第二步：基于研究生成完整内容
+    generate_msg = [
+        {"role": "user", "content": AI_GENERATE_PROMPT.format(
+            user_prompt=prompt,
+            research_result=json.dumps(research, ensure_ascii=False, indent=2),
+            theme=theme,
+            slide_count=slide_count,
+        )}
+    ]
+    raw_content = call_deepseek(generate_msg, 4096)
+    content = parse_json(raw_content)
+    return content, research
 
 
 def build_pptx(data, theme_name, slide_count):
@@ -468,13 +509,21 @@ with tab1:
             st.warning("请输入内容")
         else:
             if st.session_state.ai_enabled:
-                # AI 模式
-                with st.spinner("🤖 AI 正在分析内容并生成 PPT..."):
+                # AI 模式（两步生成：先研究后撰写）
+                with st.spinner("🔍 第1步：AI 正在研究市面上同类 PPT 的最佳结构..."):
                     try:
-                        raw = call_deepseek(prompt.strip())
-                        data = parse_ai_response(raw)
+                        data, research = generate_ppt_content(prompt.strip(), theme, slide_count)
                         slides_count = len(data.get("slides", []))
                         st.success(f"✅ AI 生成成功，共 {slides_count} 页")
+
+                        # 显示研究摘要
+                        with st.expander("📊 AI 研究摘要"):
+                            st.caption(f"**市场背景**: {research.get('market_context', '')}")
+                            st.caption(f"**目标听众**: {research.get('target_audience', '')}")
+                            st.caption(f"**关键角度**: {', '.join(research.get('key_angles', []))}")
+                            if research.get("outline"):
+                                for o in research["outline"]:
+                                    st.caption(f"- **{o.get('section', '')}**: {o.get('focus', '')}")
                     except Exception as e:
                         st.error(f"AI 生成失败: {e}")
                         st.info("自动切换到模板模式...")
