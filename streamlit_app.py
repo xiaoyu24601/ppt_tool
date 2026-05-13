@@ -676,157 +676,13 @@ def beautify_pptx(file_bytes, filename, theme_name, intensity):
 # ==================== UI ====================
 
 st.title("🪄 PPT 工具箱")
-st.caption("AI 智能生成 · 一键美化 · 通用去水印 · 布局修复")
-
-# ---- 侧边栏：权限管理 ----
-with st.sidebar:
-    st.subheader("🔐 权限管理")
-
-    if not st.session_state.ai_enabled:
-        auth_method = st.radio("选择验证方式", ["🔑 管理密码", "🎫 激活码"], horizontal=True)
-
-        if auth_method == "🔑 管理密码":
-            pwd = st.text_input("输入管理密码", type="password")
-            if st.button("验证密码", use_container_width=True):
-                if pwd == ADMIN_PASSWORD:
-                    st.session_state.ai_enabled = True
-                    st.session_state.auth_type = "admin"
-                    st.success("✅ 管理员验证成功！")
-                    st.rerun()
-                else:
-                    st.error("❌ 密码错误")
-
-        else:
-            code = st.text_input("输入激活码", placeholder="PPT-XXXX-XXXX")
-            if st.button("激活", use_container_width=True):
-                entry = validate_code(code)
-                if entry:
-                    st.session_state.ai_enabled = True
-                    st.session_state.auth_type = "activation"
-                    st.session_state.code_used = code
-                    mark_code_used(code)
-                    st.success("✅ 激活成功！")
-                    st.rerun()
-                else:
-                    st.error("❌ 激活码无效或已被使用")
-    else:
-        if st.session_state.auth_type == "admin":
-            st.success("🔓 管理员模式")
-        else:
-            st.success(f"🔓 已激活: {st.session_state.code_used}")
-        st.caption(f"剩余激活码: {sum(1 for c in VALID_CODES if not c['used'])} 个")
-
-    st.divider()
-    st.caption(f"API 余额由管理员提供 · DeepSeek")
+st.caption("一键美化 · 通用去水印 · 布局修复")
 
 # ---- 主界面 Tabs ----
-tab1, tab2, tab3, tab4 = st.tabs(["🤖 AI 生成 PPT", "✨ 美化 PPT", "🔓 通用去水印", "🔧 布局修复"])
+tab1, tab2, tab3 = st.tabs(["✨ 美化 PPT", "🔓 通用去水印", "🔧 布局修复"])
 
-# ======== Tab 1: AI 生成 PPT 内容（主输出 Kimi 提示词 + 草稿 PPTX） ========
+# ======== Tab 1: 美化 ========
 with tab1:
-    st.subheader("🤖 AI 策划 PPT 内容 → 复制到 Kimi 生成精美 PPT")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        theme = st.selectbox("🎨 风格", list(THEMES.keys()))
-    with col2:
-        slide_count = st.slider("📊 页数", 4, 15, 8)
-    with col3:
-        mode = "AI 智能策划" if st.session_state.ai_enabled else "模板生成（免费）"
-        st.info(f"📋 {mode}")
-
-    prompt = st.text_area(
-        "📝 输入主题或详细描述",
-        placeholder="短主题：新能源汽车2025市场分析\n\n也可以粘贴长描述：\n介绍当前新能源汽车市场的整体情况，分析特斯拉、比亚迪、蔚来等主要玩家的竞争格局，重点解读2025年电池技术突破对行业的影响...",
-        height=130,
-    )
-
-    if st.button("🪄 生成 PPT 内容", type="primary", use_container_width=True):
-        if not prompt.strip():
-            st.warning("请输入内容")
-        else:
-            if st.session_state.ai_enabled:
-                with st.spinner("🔍 第1步：AI 研究市场最佳实践..."):
-                    try:
-                        data, research, kimi_md = generate_ppt_content(prompt.strip(), theme, slide_count)
-
-                        # === 主输出：Kimi 提示词 ===
-                        st.success(f"✅ 内容生成成功！")
-                        st.markdown("---")
-                        st.subheader("📋 Kimi 提示词（复制下面内容，粘贴到 Kimi 即可生成精美 PPT）")
-
-                        # 用 code block 展示方便复制
-                        st.code(kimi_md, language="markdown", line_numbers=False)
-
-                        # 一键复制按钮
-                        b64 = base64.b64encode(kimi_md.encode()).decode()
-                        st.markdown(
-                            f'<a href="data:text/plain;charset=utf-8;base64,{b64}" '
-                            f'download="kimi_ppt_prompt.md" '
-                            f'style="display:inline-block;padding:8px 20px;background:#6C63FF;color:white;'
-                            f'text-decoration:none;border-radius:6px;font-weight:bold;">'
-                            f'📥 下载 Markdown 文件</a>'
-                            f'&nbsp;&nbsp;<span style="color:#888;font-size:13px;">↑ 下载后用 Kimi 打开或复制粘贴</span>',
-                            unsafe_allow_html=True,
-                        )
-
-                        # 研究摘要
-                        with st.expander("📊 AI 研究摘要"):
-                            st.caption(f"**市场背景**: {research.get('market_context', '—')}")
-                            st.caption(f"**目标听众**: {research.get('target_audience', '—')}")
-                            st.caption(f"**关键角度**: {', '.join(research.get('key_angles', []))}")
-                            if research.get("outline"):
-                                for o in research["outline"]:
-                                    st.caption(f"- **{o.get('section', '')}**: {o.get('focus', '')}")
-
-                        # === 次要输出：PPTX 草稿下载 ===
-                        st.markdown("---")
-                        st.caption("⬇️ 也可以下载 PPTX 草稿（本地生成，布局较简单；推荐用上面的 Kimi 提示词获得更好效果）")
-                        pptx_data = build_pptx(data, theme, slide_count)
-                        safe_name = re.sub(r'[^\w一-鿿]', '_', prompt.strip()[:30])
-                        st.download_button("📥 下载 PPTX 草稿", pptx_data,
-                                           file_name=f"{safe_name}_{theme}.pptx",
-                                           mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                           use_container_width=True)
-
-                    except Exception as e:
-                        st.error(f"AI 生成失败: {e}")
-                        st.info("自动切换到模板模式...")
-                        outline = OUTLINE_LIBRARY.get(theme, OUTLINE_LIBRARY["专业商务"])
-                        data = {
-                            "title": prompt.strip()[:60],
-                            "subtitle": f"{theme} · 智能生成",
-                            "slides": [{"title": item, "layout": "bullets",
-                                        "bullets": [f"{item}相关内容", "核心要点分析", "实践案例解读"], "notes": ""}
-                                       for item in outline[:slide_count - 1]],
-                        }
-                        pptx_data = build_pptx(data, theme, slide_count)
-                        safe_name = re.sub(r'[^\w一-鿿]', '_', prompt.strip()[:30])
-                        st.download_button("📥 下载 PPTX 草稿", pptx_data,
-                                           file_name=f"{safe_name}_{theme}.pptx",
-                                           mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                           use_container_width=True)
-            else:
-                st.warning("⚠️ AI 策划需要激活码或管理密码，请在左侧边栏解锁。当前使用模板生成。")
-                with st.spinner("📋 正在构建 PPT..."):
-                    outline = OUTLINE_LIBRARY.get(theme, OUTLINE_LIBRARY["专业商务"])
-                    data = {
-                        "title": prompt.strip()[:60],
-                        "subtitle": f"{theme} · 智能生成",
-                        "slides": [{"title": item, "layout": "bullets",
-                                    "bullets": [f"{item} - 核心内容", f"{item} - 关键分析", f"{item} - 实例说明"],
-                                    "notes": ""} for item in outline[:slide_count - 1]],
-                    }
-                    st.success(f"✅ 模板生成成功，共 {len(data['slides']) + 1} 页")
-                pptx_data = build_pptx(data, theme, slide_count)
-                safe_name = re.sub(r'[^\w一-鿿]', '_', prompt.strip()[:30])
-                st.download_button("📥 下载 PPTX", pptx_data,
-                                   file_name=f"{safe_name}_{theme}.pptx",
-                                   mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                   use_container_width=True)
-
-# ======== Tab 2: 美化 ========
-with tab2:
     st.subheader("✨ PPT 一键美化")
     c1, c2 = st.columns(2)
     with c1:
@@ -845,8 +701,8 @@ with tab2:
                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                                    use_container_width=True)
 
-# ======== Tab 3: 去水印 ========
-with tab3:
+# ======== Tab 2: 去水印 ========
+with tab2:
     st.subheader("🔓 通用去水印")
     wm = st.text_input("🔍 指定水印文字（可选）", placeholder="留空自动检测 80+ 常见水印")
     uploaded_w = st.file_uploader("上传 PPTX", type=["pptx"], key="w_upload")
@@ -863,8 +719,8 @@ with tab3:
                 else:
                     st.info("未检测到水印")
 
-# ======== Tab 4: 修复 ========
-with tab4:
+# ======== Tab 3: 修复 ========
+with tab3:
     st.subheader("🔧 布局修复")
     uploaded_f = st.file_uploader("上传 PPTX", type=["pptx"], key="f_upload")
     if uploaded_f:
