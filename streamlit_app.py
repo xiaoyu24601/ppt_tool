@@ -21,7 +21,7 @@ st.set_page_config(page_title="PPT 工具箱", page_icon="🪄", layout="wide")
 DEEPSEEK_API_KEY = "sk-7e6523558c3a457c93b60b2f87a9155c"
 
 # 管理密码 — 改成你自己的
-ADMIN_PASSWORD = "lmy2026ppt"
+ADMIN_PASSWORD = "24601"
 
 # 激活码密钥盐
 ACTIVATION_SALT = "ppt-tool-salt-2026"
