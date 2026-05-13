@@ -3,7 +3,7 @@ PPT 工具箱 — AI 生成 · 美化 · 去水印 · 修复
 管理密码 + 激活码 + 免 API 直接使用
 """
 import streamlit as st
-import hashlib, hmac, secrets, json, io, os, zipfile, tempfile, shutil, uuid, re
+import hashlib, hmac, secrets, json, io, os, zipfile, tempfile, shutil, uuid, re, base64
 from pathlib import Path
 from datetime import datetime, timedelta
 from pptx import Presentation
@@ -113,38 +113,97 @@ AI_RESEARCH_PROMPT = """你是一个专业的 PPT 策划顾问。用户给了你
 
 注意：返回的 outline 要包含封面页作为第一项，一共{slide_count}页左右。每页都要有明确的商业/学术价值。"""
 
-AI_GENERATE_PROMPT = """你是一个顶级的 PPT 内容撰写专家。基于以下研究报告，生成完整的 PPT 内容。
+AI_KIMI_PROMPT = """你是一个顶级 PPT 策划师。用户要把下面的内容交给 Kimi 来生成 PPT。你需要写一份**直接复制粘贴给 Kimi 的 Markdown 提示词**。
+
+## 研究报告
+{research_result}
 
 ## 用户原始主题
 {user_prompt}
 
-## AI 研究报告
-{research_result}
+## 场景：{theme}  |  目标页数：约{slide_count}页
 
-## 要求
-- 场景：{theme}
-- 总页数：约{slide_count}页（含封面）
-- 语言：中文
+## 核心任务
+写一份可以直接粘贴给 Kimi 的 PPT 生成指令。必须包含：
+
+### 1. 角色设定
+告诉Kimi它扮演什么角色（如"资深商业分析师""麦肯锡顾问"等），让它进入专业状态。
+
+### 2. 整体视觉风格
+- 配色方案建议（主色/辅色/强调色）
+- 字体风格建议
+- 整体氛围（专业/创新/温暖/科技感等）
+
+### 3. 逐页详细内容（最重要！）
+每页都要写明：
+- 页面标题
+- **布局建议**（关键！不要全用要点列表，要多样化）：
+  - 有的用左右分栏对比
+  - 有的用大数字突出关键指标
+  - 有的用表格对比
+  - 有的用时间线
+  - 有的用图标+文字卡片
+  - 有的用引用/金句强调
+- 具体文字内容（不是提纲，是可用的完整文案）
+- 可以建议配图方向（如"这里放一张市场规模趋势图"）
+
+### 4. 格式要求
+- 直接用 Markdown 格式
+- 中文输出
+- 内容具体，有数据有案例，拒绝空洞套话
+- 每页布局必须有变化，这是专业PPT的基本要求
+
+直接输出 Markdown 文本（不要用代码块包裹，不要加 json 之类的标记）："""
+
+AI_PPTX_PROMPT = """你是一个 PPT 数据格式化助手。将以下 Kimi 提示词内容转换为 PPTX 生成用的 JSON。
+
+## Kimi 提示词内容
+{kimi_markdown}
+
+## 页数限制
+约{slide_count}页
 
 输出严格的 JSON（不要 markdown）：
 {{
-  "title": "PPT 主标题（抓人眼球，20字以内）",
-  "subtitle": "副标题或一句话概括",
+  "title": "PPT 主标题",
+  "subtitle": "副标题",
   "slides": [
     {{
-      "title": "页面标题（精简有力）",
-      "bullets": ["具体要点1", "具体要点2", "具体要点3"],
+      "title": "页面标题",
+      "layout": "bullets",
+      "bullets": ["要点1（要有实质内容）", "要点2", "要点3"],
       "notes": "演讲备注"
+    }},
+    {{
+      "title": "关键数据",
+      "layout": "big_number",
+      "big_number": {{"value": "500亿", "label": "2025市场规模"}},
+      "bullets": ["补充说明"],
+      "notes": ""
+    }},
+    {{
+      "title": "方案对比",
+      "layout": "comparison",
+      "columns": [
+        {{"heading": "方案A", "items": ["特点1", "特点2"]}},
+        {{"heading": "方案B", "items": ["特点1", "特点2"]}}
+      ],
+      "notes": ""
     }}
   ]
 }}
 
-核心原则：
-- 每页要点必须有实质内容，不是空洞的套话
-- 如果研究报告中有数据方向，要点中要体现
-- 封面页的 subtitle 要有信息量，不只是场景名
-- 要点之间要有逻辑递进关系
-- 最后一页要是"总结/展望/行动建议"之类有推动感的内容"""
+可用 layout 类型及所需字段：
+- title_slide: 不需要额外字段，作为章节封面
+- bullets: 需要 "bullets" 字段（字符串数组，3-5条）
+- two_column: 需要 "columns" 字段（2列，每列有 heading + items）
+- big_number: 需要 "big_number" 字段 {{"value": "", "label": ""}}，可选 "bullets"
+- comparison: 需要 "columns" 字段（2-3列，每列有 heading + items）
+- quote: 需要 "quote_text" 和 "quote_author" 字段
+- timeline: 需要 "timeline_items" 字段 [{{"date": "", "event": ""}}]
+- summary: 需要 "summary_items" 字段（字符串数组，3-4条结论）
+
+重要：每页必须指定 layout，且要多样化，不要全部用 bullets！"""
 
 # ==================== 注册 XML 命名空间 ====================
 
@@ -183,7 +242,7 @@ def parse_json(raw):
 
 
 def generate_ppt_content(prompt, theme, slide_count):
-    """两步生成法：先研究大纲 → 再写具体内容"""
+    """三步生成法：研究 → Kimi Markdown（主输出）→ PPTX JSON（草稿）"""
     # 第一步：研究大纲
     research_msg = [
         {"role": "user", "content": AI_RESEARCH_PROMPT.format(topic=prompt, theme=theme, slide_count=slide_count)}
@@ -191,27 +250,37 @@ def generate_ppt_content(prompt, theme, slide_count):
     raw_research = call_deepseek(research_msg, 2048)
     research = parse_json(raw_research)
 
-    # 第二步：基于研究生成完整内容
-    generate_msg = [
-        {"role": "user", "content": AI_GENERATE_PROMPT.format(
+    # 第二步：生成 Kimi 优化的 Markdown 提示词（主输出）
+    kimi_msg = [
+        {"role": "user", "content": AI_KIMI_PROMPT.format(
             user_prompt=prompt,
             research_result=json.dumps(research, ensure_ascii=False, indent=2),
             theme=theme,
             slide_count=slide_count,
         )}
     ]
-    raw_content = call_deepseek(generate_msg, 4096)
+    kimi_markdown = call_deepseek(kimi_msg, 4096)
+
+    # 第三步：基于 Markdown 生成 PPTX JSON（作为草稿下载）
+    pptx_msg = [
+        {"role": "user", "content": AI_PPTX_PROMPT.format(
+            kimi_markdown=kimi_markdown[:3000],
+            slide_count=slide_count,
+        )}
+    ]
+    raw_content = call_deepseek(pptx_msg, 2048)
     content = parse_json(raw_content)
-    return content, research
+    return content, research, kimi_markdown
 
 
 def build_pptx(data, theme_name, slide_count):
-    """用 python-pptx 构建 PPTX"""
+    """多布局 PPTX 构建器 — 支持 8 种布局类型"""
     t = THEMES.get(theme_name, THEMES["专业商务"])
     is_dark = t.get("dark", False)
     pc, sc, ac = t["primary"], t["secondary"], t["accent"]
     bg = "#1E1E1E" if is_dark else "#FFFFFF"
     tc = "#FFFFFF" if is_dark else "#333333"
+    font = t["font"]
 
     def h(c):
         c = c.lstrip("#")
@@ -224,80 +293,249 @@ def build_pptx(data, theme_name, slide_count):
     title_text = data.get("title", "未命名")
     subtitle_text = data.get("subtitle", "")
     slides = data.get("slides", [])
-
     if not slides:
-        # 如果 AI 没给 slides，自动拆分
-        slides = [{"title": title_text, "bullets": ["请查看详细内容"], "notes": ""}]
+        slides = [{"title": title_text, "layout": "bullets", "bullets": ["请查看详细内容"], "notes": ""}]
 
-    # === 封面 ===
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
-    sl.background.fill.solid(); sl.background.fill.fore_color.rgb = h(bg)
+    def add_bg(slide):
+        slide.background.fill.solid()
+        slide.background.fill.fore_color.rgb = h(bg)
 
-    # 装饰条
-    bar = sl.shapes.add_shape(1, Inches(0), Inches(0), Inches(0.12), Inches(7.5))
-    bar.fill.solid(); bar.fill.fore_color.rgb = h(sc); bar.line.fill.background()
+    def add_pn(slide, num):
+        tb = slide.shapes.add_textbox(Inches(12.3), Inches(7.0), Inches(0.8), Inches(0.35))
+        p = tb.text_frame.paragraphs[0]
+        p.text = str(num); p.font.size = Pt(11)
+        p.font.color.rgb = h("#AAAAAA"); p.alignment = PP_ALIGN.RIGHT
 
-    # 标题
-    tb = sl.shapes.add_textbox(Inches(1.2), Inches(1.8), Inches(11), Inches(2.2))
-    p = tb.text_frame.paragraphs[0]
-    p.text = title_text[:60]; p.font.size = Pt(48); p.font.bold = True
-    p.font.color.rgb = h(pc); p.font.name = t["font"]
-
-    # 副标题
-    if subtitle_text:
-        tb2 = sl.shapes.add_textbox(Inches(1.2), Inches(4.2), Inches(11), Inches(1))
-        p2 = tb2.text_frame.paragraphs[0]
-        p2.text = subtitle_text[:100]; p2.font.size = Pt(20)
-        p2.font.color.rgb = h("#999999"); p2.font.name = t["font"]
-
-    # 日期
-    tb3 = sl.shapes.add_textbox(Inches(1.2), Inches(5.5), Inches(11), Inches(0.5))
-    p3 = tb3.text_frame.paragraphs[0]
-    p3.text = datetime.now().strftime("%Y.%m.%d")
-    p3.font.size = Pt(14); p3.font.color.rgb = h("#AAAAAA")
-
-    # === 内容页 ===
-    for i, slide in enumerate(slides[:slide_count]):
-        sl = prs.slides.add_slide(prs.slide_layouts[6])
-        sl.background.fill.solid(); sl.background.fill.fore_color.rgb = h(bg)
-
-        # 顶部色条
-        bar = sl.shapes.add_shape(1, Inches(0), Inches(0), Inches(13.333), Inches(0.06))
+    def add_title(slide, title):
+        bar = slide.shapes.add_shape(1, Inches(0.7), Inches(0.45), Inches(0.07), Inches(0.55))
         bar.fill.solid(); bar.fill.fore_color.rgb = h(sc); bar.line.fill.background()
-
-        # 页码
-        nb = sl.shapes.add_shape(1, Inches(0.5), Inches(0.4), Inches(0.55), Inches(0.55))
-        nb.fill.solid(); nb.fill.fore_color.rgb = h(sc); nb.line.fill.background()
-        np = nb.text_frame.paragraphs[0]; np.text = str(i + 1)
-        np.font.size = Pt(14); np.font.bold = True; np.font.color.rgb = h("#FFFFFF")
-        np.alignment = PP_ALIGN.CENTER
-
-        # 标题
-        tb = sl.shapes.add_textbox(Inches(1.5), Inches(0.3), Inches(11), Inches(0.75))
+        tb = slide.shapes.add_textbox(Inches(1.0), Inches(0.35), Inches(10.5), Inches(0.7))
         tp = tb.text_frame.paragraphs[0]
-        tp.text = slide.get("title", f"第{i+1}页"); tp.font.size = Pt(32)
-        tp.font.bold = True; tp.font.color.rgb = h(pc); tp.font.name = t["font"]
-
-        # 分隔线
-        ln = sl.shapes.add_shape(1, Inches(1.5), Inches(1.2), Inches(2.5), Inches(0.025))
+        tp.text = title; tp.font.size = Pt(30); tp.font.bold = True
+        tp.font.color.rgb = h(pc); tp.font.name = font
+        ln = slide.shapes.add_shape(1, Inches(1.0), Inches(1.15), Inches(2.0), Inches(0.022))
         ln.fill.solid(); ln.fill.fore_color.rgb = h(sc); ln.line.fill.background()
 
-        # 要点
-        bullets = slide.get("bullets", ["暂无内容"])
-        tb2 = sl.shapes.add_textbox(Inches(1.8), Inches(1.6), Inches(10.5), Inches(5))
-        tf2 = tb2.text_frame; tf2.word_wrap = True
-        for j, bullet in enumerate(bullets):
-            p = tf2.paragraphs[0] if j == 0 else tf2.add_paragraph()
-            p.text = f"▸ {bullet}"; p.font.size = Pt(18)
-            p.font.color.rgb = h(tc); p.font.name = t["font"]
-            p.space_after = Pt(14)
-
-        # 备注
-        if slide.get("notes"):
+    def add_notes(slide, data_slide):
+        if data_slide.get("notes"):
             try:
-                sl.notes_slide.notes_text_frame.text = slide["notes"]
+                slide.notes_slide.notes_text_frame.text = data_slide["notes"]
             except:
                 pass
+
+    # === 封面 ===
+    sl = prs.slides.add_slide(prs.slide_layouts[6]); add_bg(sl)
+    deco = sl.shapes.add_shape(1, Inches(0), Inches(0), Inches(0.13), Inches(7.5))
+    deco.fill.solid(); deco.fill.fore_color.rgb = h(sc); deco.line.fill.background()
+    deco2 = sl.shapes.add_shape(1, Inches(8.5), Inches(0), Inches(4.833), Inches(0.07))
+    deco2.fill.solid(); deco2.fill.fore_color.rgb = h(ac); deco2.line.fill.background()
+    tb = sl.shapes.add_textbox(Inches(1.2), Inches(1.8), Inches(10.5), Inches(2.5))
+    p = tb.text_frame.paragraphs[0]
+    p.text = title_text[:60]; p.font.size = Pt(52); p.font.bold = True
+    p.font.color.rgb = h(pc); p.font.name = font
+    if subtitle_text:
+        tb2 = sl.shapes.add_textbox(Inches(1.2), Inches(4.4), Inches(10.5), Inches(1.2))
+        p2 = tb2.text_frame.paragraphs[0]
+        p2.text = subtitle_text[:120]; p2.font.size = Pt(20)
+        p2.font.color.rgb = h("#888888"); p2.font.name = font
+    tb3 = sl.shapes.add_textbox(Inches(1.2), Inches(6.4), Inches(10.5), Inches(0.4))
+    p3 = tb3.text_frame.paragraphs[0]
+    p3.text = f"{datetime.now().strftime('%Y.%m.%d')}  |  {theme_name}"
+    p3.font.size = Pt(12); p3.font.color.rgb = h("#AAAAAA")
+
+    # === 内容页 ===
+    for i, sd in enumerate(slides[:slide_count]):
+        sl = prs.slides.add_slide(prs.slide_layouts[6]); add_bg(sl)
+        layout = sd.get("layout", "bullets")
+        stitle = sd.get("title", f"第{i+1}页")
+        card_c = ["#F5F5F5" if not is_dark else "#2A2A2A",
+                  "#FAFAFA" if not is_dark else "#252525"]
+
+        if layout == "title_slide":
+            deco = sl.shapes.add_shape(1, Inches(0), Inches(0), Inches(0.13), Inches(7.5))
+            deco.fill.solid(); deco.fill.fore_color.rgb = h(sc); deco.line.fill.background()
+            tb = sl.shapes.add_textbox(Inches(1.5), Inches(2.5), Inches(10), Inches(2.5))
+            p = tb.text_frame.paragraphs[0]
+            p.text = stitle; p.font.size = Pt(48); p.font.bold = True
+            p.font.color.rgb = h(pc); p.font.name = font
+            bullets = sd.get("bullets", [])
+            if bullets:
+                tb2 = sl.shapes.add_textbox(Inches(1.5), Inches(5.2), Inches(10), Inches(0.8))
+                p2 = tb2.text_frame.paragraphs[0]
+                p2.text = bullets[0]; p2.font.size = Pt(18)
+                p2.font.color.rgb = h("#999999"); p2.font.name = font
+            add_pn(sl, i + 1); add_notes(sl, sd)
+
+        elif layout == "bullets":
+            add_title(sl, stitle)
+            bullets = sd.get("bullets", ["暂无内容"])
+            colors3 = [pc, sc, ac]
+            for j, bullet in enumerate(bullets):
+                y = Inches(1.55 + j * 1.05)
+                circle = sl.shapes.add_shape(9, Inches(1.1), y + Inches(0.03), Inches(0.42), Inches(0.42))
+                circle.fill.solid(); circle.fill.fore_color.rgb = h(colors3[j % 3]); circle.line.fill.background()
+                cp = circle.text_frame.paragraphs[0]
+                cp.text = str(j + 1); cp.font.size = Pt(13); cp.font.bold = True
+                cp.font.color.rgb = h("#FFFFFF"); cp.alignment = PP_ALIGN.CENTER
+                card = sl.shapes.add_shape(5, Inches(1.75), y, Inches(10.2), Inches(0.78))
+                card.fill.solid()
+                try: card.fill.fore_color.rgb = h(card_c[j % 2])
+                except: pass
+                card.line.fill.background()
+                tb = sl.shapes.add_textbox(Inches(2.05), y + Inches(0.05), Inches(9.7), Inches(0.68))
+                tp = tb.text_frame.paragraphs[0]
+                tp.text = bullet[:110]; tp.font.size = Pt(16)
+                tp.font.color.rgb = h(tc); tp.font.name = font
+            add_pn(sl, i + 1); add_notes(sl, sd)
+
+        elif layout == "two_column":
+            add_title(sl, stitle)
+            cols = sd.get("columns", [{"heading": "左栏", "items": ["—"]}, {"heading": "右栏", "items": ["—"]}])
+            for ci, col in enumerate(cols[:2]):
+                x = Inches(1.0 + ci * 6.1)
+                tb = sl.shapes.add_textbox(x, Inches(1.5), Inches(5.5), Inches(0.5))
+                tp = tb.text_frame.paragraphs[0]
+                tp.text = col.get("heading", ""); tp.font.size = Pt(20); tp.font.bold = True
+                tp.font.color.rgb = h(sc); tp.font.name = font
+                ln = sl.shapes.add_shape(1, x, Inches(2.05), Inches(1.3), Inches(0.02))
+                ln.fill.solid(); ln.fill.fore_color.rgb = h(sc); ln.line.fill.background()
+                for jj, item in enumerate(col.get("items", [])):
+                    iy = Inches(2.3 + jj * 0.55)
+                    tb2 = sl.shapes.add_textbox(x + Inches(0.15), iy, Inches(5.2), Inches(0.48))
+                    tp2 = tb2.text_frame.paragraphs[0]
+                    tp2.text = f"▸ {item[:80]}"; tp2.font.size = Pt(15)
+                    tp2.font.color.rgb = h(tc); tp2.font.name = font
+            if len(cols) >= 2:
+                div = sl.shapes.add_shape(1, Inches(6.6), Inches(1.5), Inches(0.013), Inches(5.2))
+                div.fill.solid(); div.fill.fore_color.rgb = h("#DDDDDD"); div.line.fill.background()
+            add_pn(sl, i + 1); add_notes(sl, sd)
+
+        elif layout == "big_number":
+            add_title(sl, stitle)
+            bn = sd.get("big_number", {"value": "—", "label": ""})
+            tb = sl.shapes.add_textbox(Inches(1.0), Inches(2.0), Inches(11.3), Inches(2.5))
+            tp = tb.text_frame.paragraphs[0]
+            tp.text = str(bn.get("value", "—")); tp.font.size = Pt(80); tp.font.bold = True
+            tp.font.color.rgb = h(sc); tp.font.name = font; tp.alignment = PP_ALIGN.CENTER
+            label = bn.get("label", "")
+            if label:
+                tb2 = sl.shapes.add_textbox(Inches(2.0), Inches(4.6), Inches(9.3), Inches(0.7))
+                tp2 = tb2.text_frame.paragraphs[0]
+                tp2.text = label; tp2.font.size = Pt(22)
+                tp2.font.color.rgb = h(tc); tp2.font.name = font; tp2.alignment = PP_ALIGN.CENTER
+            for j, bullet in enumerate(sd.get("bullets", [])[:2]):
+                tb3 = sl.shapes.add_textbox(Inches(2.5), Inches(5.4 + j * 0.42), Inches(8.3), Inches(0.38))
+                tp3 = tb3.text_frame.paragraphs[0]
+                tp3.text = f"• {bullet[:100]}"; tp3.font.size = Pt(14)
+                tp3.font.color.rgb = h("#888888"); tp3.font.name = font; tp3.alignment = PP_ALIGN.CENTER
+            add_pn(sl, i + 1); add_notes(sl, sd)
+
+        elif layout == "comparison":
+            add_title(sl, stitle)
+            cols = sd.get("columns", [])
+            if not cols:
+                cols = [{"heading": "A", "items": ["—"]}, {"heading": "B", "items": ["—"]}]
+            n = min(len(cols), 3)
+            cw = 10.5 / n
+            for ci, col in enumerate(cols[:3]):
+                x = Inches(1.3 + ci * (cw + 0.25))
+                hdr = sl.shapes.add_shape(1, x, Inches(1.5), Inches(cw), Inches(0.52))
+                hdr.fill.solid()
+                hdr.fill.fore_color.rgb = h([pc, sc, ac][ci % 3])
+                hdr.line.fill.background()
+                hp = hdr.text_frame.paragraphs[0]
+                hp.text = col.get("heading", ""); hp.font.size = Pt(17); hp.font.bold = True
+                hp.font.color.rgb = h("#FFFFFF"); hp.alignment = PP_ALIGN.CENTER
+                for jj, item in enumerate(col.get("items", [])):
+                    iy = Inches(2.25 + jj * 0.52)
+                    card = sl.shapes.add_shape(5, x, iy, Inches(cw), Inches(0.43))
+                    card.fill.solid()
+                    try: card.fill.fore_color.rgb = h(card_c[jj % 2])
+                    except: pass
+                    card.line.fill.background()
+                    ctb = sl.shapes.add_textbox(x + Inches(0.12), iy + Inches(0.04), Inches(cw - 0.24), Inches(0.35))
+                    ctp = ctb.text_frame.paragraphs[0]
+                    ctp.text = item[:60]; ctp.font.size = Pt(13)
+                    ctp.font.color.rgb = h(tc); ctp.font.name = font; ctp.alignment = PP_ALIGN.CENTER
+            add_pn(sl, i + 1); add_notes(sl, sd)
+
+        elif layout == "quote":
+            add_title(sl, stitle)
+            qm = sl.shapes.add_textbox(Inches(1.5), Inches(1.5), Inches(2), Inches(2))
+            qp = qm.text_frame.paragraphs[0]
+            qp.text = "❭"; qp.font.size = Pt(72)
+            qp.font.color.rgb = h(sc); qp.font.name = font
+            qt = sd.get("quote_text", stitle)
+            tb = sl.shapes.add_textbox(Inches(2.5), Inches(2.2), Inches(9.5), Inches(3))
+            tp = tb.text_frame.paragraphs[0]
+            tp.text = qt[:200]; tp.font.size = Pt(28); tp.font.italic = True
+            tp.font.color.rgb = h(pc); tp.font.name = font
+            qa = sd.get("quote_author", "")
+            if qa:
+                tb2 = sl.shapes.add_textbox(Inches(2.5), Inches(5.5), Inches(9.5), Inches(0.5))
+                tp2 = tb2.text_frame.paragraphs[0]
+                tp2.text = f"—— {qa}"; tp2.font.size = Pt(16)
+                tp2.font.color.rgb = h("#999999"); tp2.font.name = font
+                tp2.alignment = PP_ALIGN.RIGHT
+            add_pn(sl, i + 1); add_notes(sl, sd)
+
+        elif layout == "timeline":
+            add_title(sl, stitle)
+            items = sd.get("timeline_items", [])
+            if not items:
+                items = [{"date": f"阶段{j+1}", "event": b}
+                         for j, b in enumerate(sd.get("bullets", ["暂无内容"]))]
+            ly = Inches(3.5)
+            hline = sl.shapes.add_shape(1, Inches(1.2), ly, Inches(10.9), Inches(0.028))
+            hline.fill.solid(); hline.fill.fore_color.rgb = h(sc); hline.line.fill.background()
+            n = len(items)
+            for j, item in enumerate(items[:6]):
+                x = Inches(1.2 + j * (10.5 / max(n - 1, 1)))
+                dot = sl.shapes.add_shape(9, x - Inches(0.09), ly - Inches(0.09), Inches(0.2), Inches(0.2))
+                dot.fill.solid(); dot.fill.fore_color.rgb = h(sc); dot.line.fill.background()
+                dtb = sl.shapes.add_textbox(x - Inches(0.55), ly - Inches(0.8), Inches(1.3), Inches(0.38))
+                dp = dtb.text_frame.paragraphs[0]
+                dp.text = item.get("date", ""); dp.font.size = Pt(13); dp.font.bold = True
+                dp.font.color.rgb = h(sc); dp.font.name = font; dp.alignment = PP_ALIGN.CENTER
+                etb = sl.shapes.add_textbox(x - Inches(0.65), ly + Inches(0.28), Inches(1.5), Inches(2.0))
+                etb.text_frame.word_wrap = True
+                ep = etb.text_frame.paragraphs[0]
+                ep.text = item.get("event", "")[:60]; ep.font.size = Pt(11)
+                ep.font.color.rgb = h(tc); ep.font.name = font; ep.alignment = PP_ALIGN.CENTER
+            add_pn(sl, i + 1); add_notes(sl, sd)
+
+        elif layout == "summary":
+            add_title(sl, stitle)
+            items = sd.get("summary_items", sd.get("bullets", ["谢谢"]))
+            box_c = [pc, sc, ac]
+            for j, item in enumerate(items[:4]):
+                x = Inches(1.0 + (j % 2) * 6.1)
+                y = Inches(1.55 + (j // 2) * 2.6)
+                num = sl.shapes.add_textbox(x, y, Inches(0.75), Inches(0.75))
+                np = num.text_frame.paragraphs[0]
+                np.text = f"0{j+1}"; np.font.size = Pt(36); np.font.bold = True
+                np.font.color.rgb = h(box_c[j % 3])
+                card = sl.shapes.add_shape(5, x + Inches(0.65), y + Inches(0.08), Inches(4.85), Inches(0.85))
+                card.fill.solid()
+                try: card.fill.fore_color.rgb = h(card_c[0])
+                except: pass
+                card.line.fill.background()
+                ctb = sl.shapes.add_textbox(x + Inches(0.85), y + Inches(0.12), Inches(4.45), Inches(0.75))
+                ctp = ctb.text_frame.paragraphs[0]
+                ctp.text = item[:110]; ctp.font.size = Pt(15)
+                ctp.font.color.rgb = h(tc); ctp.font.name = font
+            add_pn(sl, i + 1); add_notes(sl, sd)
+
+        else:
+            # fallback
+            add_title(sl, stitle)
+            for j, bullet in enumerate(sd.get("bullets", ["暂无内容"])):
+                y = Inches(1.55 + j * 0.65)
+                tb = sl.shapes.add_textbox(Inches(1.3), y, Inches(11), Inches(0.5))
+                tp = tb.text_frame.paragraphs[0]
+                tp.text = f"▸ {bullet[:120]}"; tp.font.size = Pt(18)
+                tp.font.color.rgb = h(tc); tp.font.name = font
+            add_pn(sl, i + 1); add_notes(sl, sd)
 
     output = io.BytesIO()
     prs.save(output); output.seek(0)
@@ -484,9 +722,9 @@ with st.sidebar:
 # ---- 主界面 Tabs ----
 tab1, tab2, tab3, tab4 = st.tabs(["🤖 AI 生成 PPT", "✨ 美化 PPT", "🔓 通用去水印", "🔧 布局修复"])
 
-# ======== Tab 1: AI 生成 ========
+# ======== Tab 1: AI 生成 PPT 内容（主输出 Kimi 提示词 + 草稿 PPTX） ========
 with tab1:
-    st.subheader("一句话或长描述，生成专业 PPT")
+    st.subheader("🤖 AI 策划 PPT 内容 → 复制到 Kimi 生成精美 PPT")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -494,36 +732,63 @@ with tab1:
     with col2:
         slide_count = st.slider("📊 页数", 4, 15, 8)
     with col3:
-        generation_mode = "AI 智能生成" if st.session_state.ai_enabled else "模板生成（免费）"
-        st.info(f"📋 {generation_mode}")
+        mode = "AI 智能策划" if st.session_state.ai_enabled else "模板生成（免费）"
+        st.info(f"📋 {mode}")
 
-    # 长文本输入区域
     prompt = st.text_area(
         "📝 输入主题或详细描述",
         placeholder="短主题：新能源汽车2025市场分析\n\n也可以粘贴长描述：\n介绍当前新能源汽车市场的整体情况，分析特斯拉、比亚迪、蔚来等主要玩家的竞争格局，重点解读2025年电池技术突破对行业的影响...",
-        height=150,
+        height=130,
     )
 
-    if st.button("🪄 生成 PPT", type="primary", use_container_width=True):
+    if st.button("🪄 生成 PPT 内容", type="primary", use_container_width=True):
         if not prompt.strip():
             st.warning("请输入内容")
         else:
             if st.session_state.ai_enabled:
-                # AI 模式（两步生成：先研究后撰写）
-                with st.spinner("🔍 第1步：AI 正在研究市面上同类 PPT 的最佳结构..."):
+                with st.spinner("🔍 第1步：AI 研究市场最佳实践..."):
                     try:
-                        data, research = generate_ppt_content(prompt.strip(), theme, slide_count)
-                        slides_count = len(data.get("slides", []))
-                        st.success(f"✅ AI 生成成功，共 {slides_count} 页")
+                        data, research, kimi_md = generate_ppt_content(prompt.strip(), theme, slide_count)
 
-                        # 显示研究摘要
+                        # === 主输出：Kimi 提示词 ===
+                        st.success(f"✅ 内容生成成功！")
+                        st.markdown("---")
+                        st.subheader("📋 Kimi 提示词（复制下面内容，粘贴到 Kimi 即可生成精美 PPT）")
+
+                        # 用 code block 展示方便复制
+                        st.code(kimi_md, language="markdown", line_numbers=False)
+
+                        # 一键复制按钮
+                        b64 = base64.b64encode(kimi_md.encode()).decode()
+                        st.markdown(
+                            f'<a href="data:text/plain;charset=utf-8;base64,{b64}" '
+                            f'download="kimi_ppt_prompt.md" '
+                            f'style="display:inline-block;padding:8px 20px;background:#6C63FF;color:white;'
+                            f'text-decoration:none;border-radius:6px;font-weight:bold;">'
+                            f'📥 下载 Markdown 文件</a>'
+                            f'&nbsp;&nbsp;<span style="color:#888;font-size:13px;">↑ 下载后用 Kimi 打开或复制粘贴</span>',
+                            unsafe_allow_html=True,
+                        )
+
+                        # 研究摘要
                         with st.expander("📊 AI 研究摘要"):
-                            st.caption(f"**市场背景**: {research.get('market_context', '')}")
-                            st.caption(f"**目标听众**: {research.get('target_audience', '')}")
+                            st.caption(f"**市场背景**: {research.get('market_context', '—')}")
+                            st.caption(f"**目标听众**: {research.get('target_audience', '—')}")
                             st.caption(f"**关键角度**: {', '.join(research.get('key_angles', []))}")
                             if research.get("outline"):
                                 for o in research["outline"]:
                                     st.caption(f"- **{o.get('section', '')}**: {o.get('focus', '')}")
+
+                        # === 次要输出：PPTX 草稿下载 ===
+                        st.markdown("---")
+                        st.caption("⬇️ 也可以下载 PPTX 草稿（本地生成，布局较简单；推荐用上面的 Kimi 提示词获得更好效果）")
+                        pptx_data = build_pptx(data, theme, slide_count)
+                        safe_name = re.sub(r'[^\w一-鿿]', '_', prompt.strip()[:30])
+                        st.download_button("📥 下载 PPTX 草稿", pptx_data,
+                                           file_name=f"{safe_name}_{theme}.pptx",
+                                           mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                           use_container_width=True)
+
                     except Exception as e:
                         st.error(f"AI 生成失败: {e}")
                         st.info("自动切换到模板模式...")
@@ -531,31 +796,34 @@ with tab1:
                         data = {
                             "title": prompt.strip()[:60],
                             "subtitle": f"{theme} · 智能生成",
-                            "slides": [{"title": item, "bullets": [f"{item}相关内容", "核心要点分析", "实践案例解读"], "notes": ""} for item in outline[:slide_count - 1]],
+                            "slides": [{"title": item, "layout": "bullets",
+                                        "bullets": [f"{item}相关内容", "核心要点分析", "实践案例解读"], "notes": ""}
+                                       for item in outline[:slide_count - 1]],
                         }
+                        pptx_data = build_pptx(data, theme, slide_count)
+                        safe_name = re.sub(r'[^\w一-鿿]', '_', prompt.strip()[:30])
+                        st.download_button("📥 下载 PPTX 草稿", pptx_data,
+                                           file_name=f"{safe_name}_{theme}.pptx",
+                                           mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                           use_container_width=True)
             else:
-                # 模板模式（免费）
-                if not st.session_state.ai_enabled:
-                    st.warning("⚠️ AI 生成需要激活码或管理密码，请在左侧边栏解锁。当前使用模板生成。")
-
+                st.warning("⚠️ AI 策划需要激活码或管理密码，请在左侧边栏解锁。当前使用模板生成。")
                 with st.spinner("📋 正在构建 PPT..."):
                     outline = OUTLINE_LIBRARY.get(theme, OUTLINE_LIBRARY["专业商务"])
                     data = {
                         "title": prompt.strip()[:60],
                         "subtitle": f"{theme} · 智能生成",
-                        "slides": [{"title": item, "bullets": [f"{item} - 核心内容", f"{item} - 关键分析", f"{item} - 实例说明"], "notes": ""} for item in outline[:slide_count - 1]],
+                        "slides": [{"title": item, "layout": "bullets",
+                                    "bullets": [f"{item} - 核心内容", f"{item} - 关键分析", f"{item} - 实例说明"],
+                                    "notes": ""} for item in outline[:slide_count - 1]],
                     }
                     st.success(f"✅ 模板生成成功，共 {len(data['slides']) + 1} 页")
-
-            with st.spinner("📄 构建 PPTX 文件..."):
                 pptx_data = build_pptx(data, theme, slide_count)
-
-            # 根据内容生成文件名
-            safe_name = re.sub(r'[^\w一-鿿]', '_', prompt.strip()[:30])
-            st.download_button("📥 下载 PPTX", pptx_data,
-                               file_name=f"{safe_name}_{theme}.pptx",
-                               mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                               use_container_width=True)
+                safe_name = re.sub(r'[^\w一-鿿]', '_', prompt.strip()[:30])
+                st.download_button("📥 下载 PPTX", pptx_data,
+                                   file_name=f"{safe_name}_{theme}.pptx",
+                                   mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                   use_container_width=True)
 
 # ======== Tab 2: 美化 ========
 with tab2:
